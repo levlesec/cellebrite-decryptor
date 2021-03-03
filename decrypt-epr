@@ -1,0 +1,236 @@
+#!/usr/bin/python
+from logging.handlers import TimedRotatingFileHandler
+from optparse import OptionParser
+from os.path import exists, getsize, dirname, realpath
+from os.path import join as path_join
+from os import system, remove
+from shutil import move
+from Crypto.Cipher import AES
+from binascii import unhexlify, hexlify
+from hashlib import sha256
+import sys
+import logging
+
+logging.basicConfig(
+  format="%(asctime)s [%(levelname)s] %(message)s",
+  level=logging.INFO,
+  handlers=[
+    TimedRotatingFileHandler(
+      path_join(
+ dirname(realpath(__file__)),
+ "logger.log",
+      ),
+      interval=1,
+    ),
+    logging.StreamHandler(sys.stdout),
+  ],
+)
+logger = logging.getLogger(__name__)
+
+bs = AES.block_size
+pad = lambda s: s + (bs - len(s) % bs) * chr(bs - len(s) % bs)
+
+class EPR:
+  def __init__(self, file, version, verbose):
+    self.epr_v1_aes_key = "0e282e124bb8af53357f7e8cb3460a23c94def3fe4f181a57c9fcba3f5f7f054" # Already public information
+    self.epr_v1_aes_iv = "888c609edc9eb9dfb4d30dfebc9f0431"      # Already public information
+    self.epr_v2_aes_key = "[REDACTED]"
+    self.epr_v2_aes_iv = "[REDACTED]"
+    self.epr_v3_aes_key = self.epr_v2_aes_key
+    self.epr_v3_aes_iv = self.epr_v2_aes_iv
+    self.epr_v2_aes_map = "[REDACTED]"
+    self.epr_v3_aes_map = "[REDACTED]"
+    self.epr_v3_aes_iv_two = None
+    self.file = file or False
+    self.version = version
+    self.encrypted_file = None
+    self.encrypted_epr = None
+    self.encrypted_magic = None
+    self.decrypted_epr = None
+    self.final_epr = b''
+    self.logging = verbose
+  def file_exists(self):
+    if not self.file:
+      return False
+    return exists(self.file)
+  def can_read_file(self):
+    return getsize(self.file)
+  def read_entire_file(self):
+    try:
+      fp = open(self.file,'rb')
+      self.encrypted_file = fp.read()
+      fp.close()
+    except Exception as e:
+      logger.error("[!] Encountered an exception. Reason: {}".format(e))
+      return False
+    return True
+  def flat_decrypt(self):
+    self.encrypted_magic = self.encrypted_file[:21]
+    if (self.encrypted_magic[:-2] == "Cellebrite EPR File"):
+      self.encrypted_epr = self.encrypted_file[21:]
+      if self.version == 1:
+ crypter = AES.new(unhexlify(self.epr_v1_aes_key),AES.MODE_CBC,unhexlify(self.epr_v1_aes_iv))
+ if self.logging: logger.info("[-] Decrypter setup with key 1 for version {}".format(self.version))
+      else:
+ crypter = AES.new(unhexlify(self.epr_v3_aes_key),AES.MODE_CBC,unhexlify(self.epr_v3_aes_iv))
+ if self.logging: logger.info("[-] Decrypter setup with key 1 for version {}".format(self.version))
+      try:
+ self.decrypted_epr = crypter.decrypt(self.encrypted_epr)
+ if self.version == 2:
+   self.epr_v2_aes_iv_two = hexlify(self.decrypted_epr[32:48])
+ elif self.version == 3:
+   self.epr_v3_aes_iv_two = hexlify(self.decrypted_epr[32:48])
+ else:
+   pass
+      except Exception as e:
+ logger.error("[!] Encountered an exception. Reason: {}".format(e))
+ return False
+      return True
+    return False
+  def calc_sha256_dword(self):
+    try:
+      to_xor_a = hexlify(self.decrypted_epr[24:28])
+      to_xor_a = [to_xor_a[i:i+2] for i in range(0, len(to_xor_a), 2)]
+      to_xor_b = hexlify(self.decrypted_epr[28:32])
+      to_xor_b = [to_xor_b[i:i+2] for i in range(0, len(to_xor_b), 2)]
+      xored_1 = int(to_xor_a[-1],16) ^ int(to_xor_b[-1],16)
+      xored_1 = "{0:0{1}x}".format(xored_1,2)
+      xored_2 = int(to_xor_a[-2],16) ^ int(to_xor_b[-2],16)
+      xored_2 = "{0:0{1}x}".format(xored_2,2)
+      xored_3 = int(to_xor_a[-3],16) ^ int(to_xor_b[-3],16)
+      xored_3 = "{0:0{1}x}".format(xored_3,2)
+      xored_4 = int(to_xor_a[-4],16) ^ int(to_xor_b[-4],16)
+      xored_4 = "{0:0{1}x}".format(xored_4,2)
+      if (self.version == 2):
+ self.epr_v2_sha256_flag = str(xored_4) + str(xored_3) + str(xored_2) + str(xored_1)
+ if self.logging: logger.info("[-] Calculated that the flag will be: {}".format(self.epr_v2_sha256_flag))
+      else:
+ self.epr_v3_sha256_flag = str(xored_4) + str(xored_3) + str(xored_2) + str(xored_1)
+ if self.logging: logger.info("[-] Calculated that the flag will be: {}".format(self.epr_v3_sha256_flag))
+    except Exception as e:
+      logger.error("[!] Encountered an exception. Reason: {}".format(e))
+      return False
+    return True
+  def key_map_check(self):
+    found = False
+    if (self.version == 2):
+      for i in range(0, len(self.epr_v2_aes_map), 64):
+ hash = sha256(unhexlify(self.epr_v2_aes_map[i:i+64])).hexdigest()
+ if (hash.endswith(self.epr_v2_sha256_flag)):
+   if self.logging: logger.info("[-] Found the flag: {}".format(self.epr_v2_sha256_flag))
+   found = True
+   self.epr_v2_aes_key_two = self.epr_v2_aes_map[i:i+64]
+    else:
+      for i in range(0, len(self.epr_v3_aes_map), 64):
+ hash = sha256(unhexlify(self.epr_v3_aes_map[i:i+64])).hexdigest()
+ if (hash.endswith(self.epr_v3_sha256_flag)):
+   if self.logging: logger.info("[-] Found the flag: {}".format(self.epr_v3_sha256_flag))
+   found = True
+   self.epr_v3_aes_key_two = self.epr_v3_aes_map[i:i+64]
+    return found
+  def decrypt_key(self):
+    try:
+      if (self.version == 2):
+ crypter = AES.new(unhexlify(self.epr_v2_aes_key_two),AES.MODE_CBC,unhexlify(self.epr_v2_aes_iv_two))
+ if self.logging: logger.info("[-] Decrypter setup with key 2 for version {}".format(self.version))
+ self.epr_v2_aes_key_three = hexlify(crypter.decrypt(self.decrypted_epr[48:80]))
+ self.epr_v2_aes_iv_three = hexlify(self.decrypted_epr[112:128])
+      else:
+ crypter = AES.new(unhexlify(self.epr_v3_aes_key_two),AES.MODE_CBC,unhexlify(self.epr_v3_aes_iv_two))
+ if self.logging: logger.info("[-] Decrypter setup with key 2 for version {}".format(self.version))
+ self.epr_v3_aes_key_three = hexlify(crypter.decrypt(self.decrypted_epr[48:80]))
+ self.epr_v3_aes_iv_three = hexlify(self.decrypted_epr[112:128])
+    except Exception as e:
+      logger.error("[!] Encountered an exception. Reason: {}".format(e))
+      return False
+    return True
+  def decrypt_epr(self):
+    if (self.version == 2):
+      crypter = AES.new(unhexlify(self.epr_v2_aes_key_three),AES.MODE_CBC,unhexlify(self.epr_v2_aes_iv_three))
+      if self.logging: logger.info("[-] AES Key: {}, IV: {}".format(self.epr_v2_aes_key_three,self.epr_v2_aes_iv_three))
+    else:
+      crypter = AES.new(unhexlify(self.epr_v3_aes_key_three),AES.MODE_CBC,unhexlify(self.epr_v3_aes_iv_three))
+      if self.logging: logger.info("[-] AES Key: {}, IV: {}".format(self.epr_v3_aes_key_three,self.epr_v3_aes_iv_three))
+    if self.logging: logger.info("[-] Decrypter setup with key 3 for version {}".format(self.version))
+    self.encrypted_epr = self.encrypted_epr[128:]
+    for pos in range(0, len(self.encrypted_epr), 65536):
+      decryptPart = self.encrypted_epr[pos:pos+65536]
+      try:
+ self.final_epr+=crypter.decrypt(decryptPart)
+      except ValueError as e:
+ self.final_epr+=crypter.decrypt(pad(decryptPart))
+    if self.logging: logger.info("[-] Finished decrypting all blocks.")
+    try:
+      if self.logging: logger.info("[-] Writing bytes to: {}.broken".format(self.file))
+      fp = open("{}.broken".format(self.file),"wb")
+      fp.write(self.final_epr)
+      fp.close()
+      if self.logging: logger.info("[-] Wrote {} bytes to a broken file.".format(len(self.final_epr)))
+    except Exception as e:
+      logger.error("[!] Encountered an exception. Reason: {}".format(e))
+      return False
+    return True
+  def zip_FF(self):
+    if self.logging: logger.info("[-] Running: zip -FF {}.broken --out {}.zip > /dev/null 2>&1".format(self.file,self.file))
+    system("zip -FF {}.broken --out {}.zip > /dev/null 2>&1".format(self.file,self.file))
+    return True
+  def finish(self):
+    if self.logging: logger.info("[-] Removing the broken file.")
+    remove("{}.broken".format(self.file))
+    move("{}.zip".format(self.file),"{}.zip".format(self.file.replace("input","output")))
+    logger.info("[+] Decrypted file available at {}.zip".format(self.file.replace("input","output")))
+    return True
+
+def main():
+  parser = OptionParser()
+  parser.add_option("--file",dest="file",default=False,help="EPR File Path")
+  parser.add_option("--version",dest="version",choices=(str(1),str(2),str(3)),default=str(3),help="EPR Version")
+  parser.add_option("--verbose",dest="verbose",action="store_true",help="Enable verbose mode")
+  o,a = parser.parse_args()
+  o.version = int(o.version)
+  epr = EPR(o.file,o.version,o.verbose)
+
+  if not epr.file_exists():
+    logger.info("[!] Unable to find the encrypted EPR file specified.")
+    return False
+  logger.info("[+] The EPR file specified exists.")
+  if not epr.can_read_file():
+    logger.info("[!] Unable to open a file object to the encrypted EPR file.")
+    return False
+  if not epr.read_entire_file():
+    logger.info("[!] Unable to read the encrypted EPR file.")
+    return False
+  logger.info("[+] The specified EPR file has been read into memory.")
+  logger.info("[+] Using the version {} decryption process.".format(o.version))
+  if not epr.flat_decrypt():
+    logger.info("[!] Unable to run the initial decryption round.")
+    return False
+  logger.info("[+] Round one of the EPR decryption completed successfully.")
+  if not epr.calc_sha256_dword():
+    logger.info("[!] Unable to calculate the SHA256 key flag.")
+    return False
+  if o.verbose: logger.info("[+] The SHA256 key flag has been calculated.")
+  if not epr.key_map_check():
+    logger.info("[!] Unable to find a AES key match.")
+    return False
+  if o.verbose: logger.info("[+] The SHA256 key flag has been found.")
+  if not epr.decrypt_key():
+    logger.info("[!] Could not decrypt the final AES key.")
+    return False
+  logger.info("[+] Round two of the EPR decryption completed successfully. Obtained the final AES key and IV.")
+  if not epr.decrypt_epr():
+    logger.info("[!] Unable to decrypt the EPR file.")
+    return False
+  logger.info("[+] Round three of the EPR decryption completed successfully. The encrypted zip archive has been decrypted.")
+  if not epr.zip_FF():
+    logger.info("[!] Could not clean up garbage.")
+    return False
+  return True
+
+if __name__ == "__main__":
+  success = main()
+  if success:
+    logger.info("[+] done")
+  else:
+    logger.info("[!] failed")
+  exit(success)

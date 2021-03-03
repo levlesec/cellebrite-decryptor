@@ -1,0 +1,71 @@
+#!/usr/bin/python
+from optparse import OptionParser
+from os.path import exists, basename
+from binascii import hexlify
+from hashlib import sha256
+from os import makedirs
+
+keyMap = {
+  # UFED 5.1
+  "Dump_MotGSM.dll":{
+    "offsets":{
+      "aes":{
+ "key":"0e282e124bb8af53357f7e8cb3460a23c94def3fe4f181a57c9fcba3f5f7f054",# Key and IV already public information
+ "iv":"888c609edc9eb9dfb4d30dfebc9f0431"      # https://github.com/cellebrited/cellebrite
+ }
+    }
+  },
+  # UFED 7.3
+  "FileUnpacking.dll":[
+    {
+      "offsets":{
+ "aes":{
+   "keySize":32,
+   "keyHash":"[REDACTED]",  # sha256 hash of first dword
+   "ivSize":16,
+   "ivHash":"[REDACTED]"    # sha256 hash of first dword
+   },
+ "mapSize":256,
+ "mapHash":"[REDACTED]"     # sha256 hash of first dword
+      }
+    }
+  ]
+}
+
+if __name__ == "__main__":
+  parser = OptionParser()
+  parser.add_option("--file",dest="file",default='',help="Decryptor DLL")
+  o,a = parser.parse_args()
+  if (exists(o.file) != True):
+    print "[!] The specified file does not exist"
+    exit(1)
+  try:
+    with open(o.file,'rb') as fp:
+      fileData = fp.read()
+    print "[-] Read {} bytes.".format(len(fileData))
+    if (isinstance(keyMap[basename(o.file)], str)):
+      if ("Dump_MotGSM.dll" == basename(o.file)):
+ print keyMap[basename(o.file)]["offsets"]["aes"]["key"] + keyMap[basename(o.file)]["offsets"]["aes"]["iv"]
+    else:
+      foundKey, foundIV, foundMap = False, False, False
+      for i in xrange(0, len(keyMap[basename(o.file)])):
+ for pos in xrange(0,len(fileData)):
+   nextDWORD = hexlify(fileData[pos:pos+4])
+   if (sha256(nextDWORD).hexdigest() == keyMap[basename(o.file)][i]["offsets"]["aes"]["keyHash"] and not foundKey):
+     foundKey = True
+     aesKey = hexlify(fileData[pos:pos+32])
+     print "[+] Found key at {}. Value: {}".format(hex(pos),aesKey)
+   if (sha256(nextDWORD).hexdigest() == keyMap[basename(o.file)][i]["offsets"]["aes"]["ivHash"] and not foundIV):
+     foundIV = True
+     aesIV = hexlify(fileData[pos:pos+16])
+     print "[+] Found IV at {}. Value: {}".format(hex(pos),aesIV)
+   if (sha256(nextDWORD).hexdigest() == keyMap[basename(o.file)][i]["offsets"]["mapHash"] and not foundMap):
+     foundMap = True
+     aesMap = hexlify(fileData[pos:pos+keyMap[basename(o.file)][i]["offsets"]["mapSize"]])
+     print "[+] Found map at {}. Value: {}".format(hex(pos),aesMap)
+   if (foundKey and foundIV and foundMap):
+     break
+   pos+=1
+  except Exception as e:
+      print "[!] Could not read the specified file. Reason: {}".format(e)
+  exit(0)
